@@ -4,6 +4,7 @@ A deployed AI-powered document assistant that enables users to upload PDFs and a
 
 ## 🌐 Live Demo
 https://rag-document-assistant-gwnmdxrfevfdbnrqhxbums.streamlit.app/
+<img width="1147" height="581" alt="Screenshot 2026-04-22 171923" src="https://github.com/user-attachments/assets/e94c9168-4686-4bfe-8df8-b3e1d7d1c7bf" />
 
 ## 🚀 Features
 - Upload and process PDF/TXT documents

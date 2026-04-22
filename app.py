@@ -1,23 +1,21 @@
 import streamlit as st
 import fitz  # PyMuPDF
 import numpy as np
-from dotenv import load_dotenv
 
-load_dotenv()
 from sentence_transformers import SentenceTransformer
 from groq import Groq
 
 # ============================================
-# 🔑 PASTE YOUR GROQ API KEY HERE (ONLY HERE)
+# 🔑 LOAD API KEY
 # ============================================
-GROQ_API_KEY = "GROQ_API_KEY"
+GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 
-if GROQ_API_KEY == "PASTE_YOUR_API_KEY_HERE":
-    st.error("⚠️ Please paste your Groq API key at the top of the code.")
+if not GROQ_API_KEY:
+    st.error("❌ API key missing")
     st.stop()
 
 # -------------------------------
-# Load models
+# Load models (cached)
 # -------------------------------
 @st.cache_resource
 def load_models():
@@ -28,7 +26,7 @@ def load_models():
 embedder, client = load_models()
 
 # -------------------------------
-# Extract text (FIXED VERSION)
+# Extract text
 # -------------------------------
 def extract_text(file_bytes, file_type):
     if file_type == "application/pdf":
@@ -38,7 +36,6 @@ def extract_text(file_bytes, file_type):
         for page in doc:
             t = page.get_text("text")
 
-            # fallback if empty
             if not t.strip():
                 blocks = page.get_text("blocks")
                 t = " ".join([b[4] for b in blocks if len(b) > 4])
@@ -53,11 +50,28 @@ def extract_text(file_bytes, file_type):
     return ""
 
 # -------------------------------
-# Chunk text
+# Chunk text (optimized)
 # -------------------------------
-def chunk_text(text, chunk_size=300):
+def chunk_text(text, chunk_size=120, overlap=40):
     words = text.split()
-    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+    chunks = []
+
+    for i in range(0, len(words), chunk_size - overlap):
+        chunks.append(" ".join(words[i:i + chunk_size]))
+
+    return chunks
+
+# -------------------------------
+# Build embeddings ONCE
+# -------------------------------
+@st.cache_data
+def build_embeddings(chunks):
+    embeddings = embedder.encode(
+        chunks,
+        batch_size=8,
+        show_progress_bar=False
+    )
+    return embeddings
 
 # -------------------------------
 # Retrieve relevant chunks
@@ -69,65 +83,64 @@ def retrieve(query, chunks, embeddings):
         np.linalg.norm(embeddings, axis=1) * np.linalg.norm(q_emb) + 1e-8
     )
 
-    top_idx = np.argsort(scores)[-3:]
+    top_idx = np.argsort(scores)[-3:][::-1]
+
     return " ".join([chunks[i] for i in top_idx])
 
 # -------------------------------
-# Call LLM (Groq)
+# Call LLM (with error handling)
 # -------------------------------
 def ask_llm(prompt):
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",  # ✅ WORKING MODEL
-        messages=[
-            {"role": "system", "content": "You are a helpful document assistant."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.2,
-        max_tokens=500
-    )
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": "Answer ONLY using the provided context. If unsure, say you don't know."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=500
+        )
+        return response.choices[0].message.content
 
-    return response.choices[0].message.content
+    except Exception as e:
+        return f"❌ Error from LLM: {str(e)}"
 
 # -------------------------------
-# Structured summary
+# Summary
 # -------------------------------
 def summarize_text(text):
-    text = text[:3000]
+    text = text[:2500]
 
     prompt = f"""
-    Summarize this document in a structured way:
+Summarize this document clearly:
 
-    - Main points
-    - Key rules
-    - Important clauses
+- Main points
+- Key facts
+- Important details
 
-    Document:
-    {text}
-    """
-
+Document:
+{text}
+"""
     return ask_llm(prompt)
 
 # -------------------------------
-# Answer query (RAG)
+# RAG Answer
 # -------------------------------
-def answer_query(query, chunks, embeddings, full_text):
-    if any(q in query.lower() for q in ["summary", "overview", "main idea"]):
-        context = full_text[:2000]
-    else:
-        context = retrieve(query, chunks, embeddings)
+def answer_query(query, chunks, embeddings):
+    context = retrieve(query, chunks, embeddings)
 
     prompt = f"""
-    Answer the question using ONLY the context below.
+Use ONLY the context below to answer.
 
-    Context:
-    {context}
+Context:
+{context}
 
-    Question:
-    {query}
+Question:
+{query}
 
-    Give a clear and accurate answer:
-    """
-
+Answer clearly:
+"""
     return ask_llm(prompt)
 
 # -------------------------------
@@ -147,22 +160,40 @@ if uploaded_file:
     st.write(text[:500])
 
     if text.strip():
+        # 🔥 Build chunks safely
         chunks = chunk_text(text)
-        embeddings = embedder.encode(chunks)
 
+        # 🔥 HARD LIMIT (critical for cloud)
+        if len(chunks) > 40:
+            chunks = chunks[:40]
+
+        st.info(f"Chunks used: {len(chunks)}")
+
+        # 🔥 Build embeddings ONCE (cached)
+        embeddings = build_embeddings(chunks)
+
+        # -------------------
+        # Summary
+        # -------------------
         if st.button("Generate Summary"):
             with st.spinner("Summarizing..."):
                 summary = summarize_text(text)
+
             st.subheader("📝 Summary")
             st.write(summary)
 
+        # -------------------
+        # Q&A
+        # -------------------
         st.subheader("💬 Ask Questions")
         query = st.text_input("Enter your question")
 
         if query:
             with st.spinner("Thinking..."):
-                answer = answer_query(query, chunks, embeddings, text)
+                answer = answer_query(query, chunks, embeddings)
+
             st.subheader("📌 Answer")
             st.write(answer)
+
     else:
         st.error("❌ No text could be extracted. Try a different PDF.")
